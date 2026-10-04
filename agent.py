@@ -8,6 +8,10 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough, RunnableSequence
 from pinecone import Pinecone, ServerlessSpec
 from langchain_core.tracers.context import tracing_v2_enabled
+from langchain_core.runnables import RunnableLambda
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai.chat_models import ChatOpenAI
+from langchain_core.runnables import RunnablePassthrough
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -153,11 +157,44 @@ index = pc.Index(index_name)
 
 # Creating the Retriever
 def retriever(question):
-    # always include the question in []. because embed_documents expects a list. 
-    # If its not a list, then each character will be treated as a separate document that needs to be embedded seperately.
-    embeddedQuestion = embeddings_model.embed_documents([question]) 
-    similar_docs = index.query(vector=embeddedQuestion, top_k=3, namespace="ns1", include_metadata=True)
+    embedded_question = embeddings_model.embed_query(question)
+    similar_docs = index.query(vector=embedded_question, top_k=3, namespace="ns1", include_metadata=True)
     return similar_docs
 
+# Modify the retrieved docs to be a context of certain format
+def formatContext(retrieved_docs):
+    return "\n".join(doc.metadata["text"] for doc in retrieved_docs['matches'])
 
+# Converting the retrievers and format context into runnables
 
+# Wrap retriever and formatContext as runnables
+retriever_runnable = RunnableLambda(retriever)  # Wrap retriever
+formatContext_runnable = RunnableLambda(formatContext)  # Wrap formatContext
+
+# Prompt template for the LLM
+prompt = ChatPromptTemplate.from_template("""
+    Answer the user question based on the following context.
+    If you dont know the answer, just say you dont know.
+
+    Context: {context}
+
+    Question: {question}""")
+
+# Creating LLM model that will generate the answer based on the context and question
+model = ChatOpenAI(openai_api_key = OPENAI_API_KEY, model="gpt-3.5-turbo")
+
+# String Parser to extract the context and question from the input string
+def outputParser(response):
+    return response.content
+
+# Creating the RAG chain using RunnableSequence
+rag_chain = (
+    {"context": retriever_runnable | formatContext_runnable, "question": RunnablePassthrough()}
+    | prompt
+    | model
+    | outputParser
+)
+
+#Invoking the chain
+# Question
+print(rag_chain.invoke("What is the locking and unlocking system like at BOFA?"))
